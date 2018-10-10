@@ -26,7 +26,7 @@ num_classes = 10
 num_fm = 256
 batch_size = 128
 workers = 4
-num_epochs = 10
+num_epochs = 20
 
 
 # In[168]:
@@ -62,7 +62,7 @@ data = dset.FashionMNIST(data_root, transform=transforms.Compose([
             transforms.Resize(image_size),
             transforms.ColorJitter(brightness=0.5),
             transforms.RandomHorizontalFlip(),
-            RandomNoise(0.1),
+            RandomNoise(0.2),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]),
             train=True,

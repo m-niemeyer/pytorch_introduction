@@ -3,11 +3,35 @@
 
 # # 3D Gan
 # 
+# ![3D Gan Output](./output/3dgan/combined.png)
+# 
 # In this notebook I implemented the 3D GAN proposed by Wu et al. ([see the paper](http://3dgan.csail.mit.edu/papers/3dgan_nips.pdf)). 
 # 
 # ## Data
 # 
-# For the data, I used the [binvox](https://www.patrickmin.com/binvox/) tool to convert the off files from ModelNet10 to binvox files, and then I used the [binvox-rw-python](https://github.com/dimatura/binvox-rw-py) script to load the binvox files into python as numpy arrays.
+# For the data, I used the [binvox](https://www.patrickmin.com/binvox/) tool to convert the off files from ModelNet10 to binvox files, and then I used the [binvox-rw-python](https://github.com/dimatura/binvox-rw-py) script to load the binvox files into python as numpy arrays. I adopted this approach as on the [ShapeNet Annotations](https://www.shapenet.org/annotations) site, it was mentioned that they followed this procedure for their voxelization.
+# 
+# **Note**: This differs from the original paper, as they trained on ShapeNet. However, they did not mention how they voxelized the .obj files.
+# 
+# ## Models
+# 
+# Let CBk be a sequence of a convolution layer with output features maps k, batch normalisation, and a ReLU. Let Ck be the same without batch normalisation. For the Discriminator, let the ReLUs be LeakyReLUs with slope 0.2. Lastly, let Ck_sig be the same as before but with the sigmoid function as activation instead of ReLU.
+# 
+# I followed the architectures proposed in the original paper:
+# 
+# **Generator**: CB512 - CB256 - CB128 - CB64 - C1_sig with kernel sizes of 4 and strides of 1 (first one) and 2 (rest).
+# 
+# **Discriminator**: CB64 - CB128 - CB256 - CB512 - C1_sig with kernel sizes 4 and strides of 2 (all except the last one) and 1 (last layer)
+# 
+# ## Training
+# 
+# For training, I used a batch size of 32 and 200 epochs. I used learning rates of 0.0025 (generator) and 10^-4 (discriminator). 
+# 
+# **Note**: In the original paper, they used a learning rate of 10^-5 for the discriminator and the policy to only perform a discriminator update if the accuracy before was below 80%. I did not implement this in my script as it produced unstable training for me.
+# 
+# ## Output
+# 
+# The networks co-domain is (0,1), so that the output needs to be transformed to be a valid occupancy grid with values of 0 and 1. In the original paper, they did not mention how they did that. I implemented the obvious rule to set all values <= 0.5 to 0 and all values > 0.5 to 1.
 
 # In[1]:
 
@@ -26,21 +50,23 @@ from mpl_toolkits.mplot3d import Axes3D
 import binvox_rw
 
 
-# In[2]:
+# In[78]:
 
 
 root_dir = './data/Shape_Generation/chair_train_binvox/'
 
-batch_size = 32
+batch_size = 128
 
 z_dim = 200
 
 ngf = 64
 ndf = 64
 
-num_epochs = 200
+num_epochs = 30
 
 show_images = False
+
+r1_regulariser = 1.0
 
 n_gpu = torch.cuda.device_count()
 device = torch.device("cuda:0" if torch.cuda.is_available() and n_gpu>0 else "cpu")
@@ -48,6 +74,8 @@ print("Running on {} GPUs.".format(n_gpu) if n_gpu>0 else "Running on CPU.")
 
 
 # ## Data set
+# 
+# I assume that the .binvox files are provided in the root_dir.
 
 # In[3]:
 
@@ -72,12 +100,6 @@ class VoxelDataset(torch.utils.data.Dataset):
         x = self.voxel_list[idx]
         x = torch.Tensor(x).float()
         return x
-
-
-# In[ ]:
-
-
-
 
 
 # In[4]:
@@ -115,8 +137,7 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         
         self.main = nn.Sequential(
-            #nn.ConvTranspose3d(z_dim, ngf*8, kernel_size=4, stride=1, padding=0),
-            nn.ConvTranspose3d(z_dim, ngf*8, kernel_size=4, stride=2, padding=0),
+            nn.ConvTranspose3d(z_dim, ngf*8, kernel_size=4, stride=1, padding=0),
             nn.BatchNorm3d(ngf*8),
             nn.ReLU(), # 4x4x4
             nn.ConvTranspose3d(ngf*8, ngf*4, kernel_size=4, stride=2, padding=1),
@@ -142,12 +163,6 @@ class Generator(nn.Module):
 
 
 netG = Generator().to(device)
-
-
-# In[ ]:
-
-
-
 
 
 # Example output of random noise
@@ -188,8 +203,7 @@ class Discriminator(nn.Module):
             nn.Conv3d(ndf*4, ndf*8, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(ndf*8),
             nn.LeakyReLU(negative_slope=0.2), #4^3
-            #nn.Conv3d(ndf*8, 1, kernel_size=4, stride=1, padding=0),
-            nn.Conv3d(ndf*8, 1, kernel_size=4, stride=2, padding=0),
+            nn.Conv3d(ndf*8, 1, kernel_size=4, stride=1, padding=0),
             nn.Sigmoid()
         )
         
@@ -237,20 +251,22 @@ if n_gpu > 1:
 
 criterion = nn.BCELoss()
 optimizerG = optim.Adam(netG.parameters(), lr=0.0025, betas=(0.5, 0.999))
-optimizerD = optim.Adam(netD.parameters(), lr=0.0001, betas=(0.5, 0.999))
+optimizerD = optim.Adam(netD.parameters(), lr=0.00001, betas=(0.5, 0.999))
 
 
-# In[36]:
+# In[89]:
 
 
 num_batches_per_epoch = len(dataloader)
 prev_acc = 0
+l2_reg = 0
 
 
-# In[46]:
+# In[95]:
 
 
-if os.path.isfile('./models/3dgan_g.pt') and os.path.isfile('./models/3dgan_d.pt'):
+#if os.path.isfile('./models/3dgan_g.pt') and os.path.isfile('./models/3dgan_d.pt'):
+if False:
     netG.load_state_dict(torch.load('./models/3dgan_g.pt'))
     netD.load_state_dict(torch.load('./models/3dgan_d.pt'))
     print('Models loaded from file.')
@@ -276,10 +292,11 @@ else:
                 prev_dz = D_z
                 real_loss = criterion(d_real, torch.full_like(d_real, 1, device=device))
                 fake_loss = criterion(d_fake, torch.full_like(d_fake, 0, device=device))
-                d_loss = real_loss + fake_loss
+                d_loss = real_loss + fake_loss 
 
                 netD.zero_grad()
                 d_loss.backward()
+                
                 optimizerD.step()
 
             # Generator update
@@ -303,61 +320,22 @@ else:
         print('Model saved.')
 
 
-# In[55]:
+# In[77]:
 
 
-if show_images:
-    z = torch.randn(2, z_dim, 1, 1, 1)
-    z = z.to(device)
-    u = netG(z).detach().cpu().numpy()
-    bo = np.zeros_like(u)
-    bo[u>0.95] = 1
-    example_batch = bo
+z = torch.randn(10, z_dim, 1, 1, 1)
+z = z.to(device)
+u = netG(z).detach().cpu().numpy()
+bo = np.zeros_like(u)
+bo[u>0.5] = 1
+example_batch = bo
     
-    x, y, z = example_batch[0].nonzero()
-    fig = plt.figure(figsize=(8,8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(x, y, -z, zdir='z', c='red')
-    
-    #ax = fig.gca(projection="3d")
-    #ax.voxels(example_batch[0], edgecolor='k')
-    plt.show()
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
+for i in range(10):
+    fig = plt.figure()
+    ax = fig.gca(projection="3d")
+    ax.voxels(example_batch[i], edgecolor='k')
+    fig.savefig('./output/3dgan/result2_'+str(i)+'.png')
+    print('Saved result image {}'.format(i))
 
 
 # In[ ]:
